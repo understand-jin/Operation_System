@@ -19,7 +19,7 @@ st.divider()
 # 주요 기능 카드 레이아웃
 st.subheader("💡 주요 기능 안내")
 
-col1, col2 = st.columns(2)
+col1, col2, col3 = st.columns(3)
 
 with col1:
     with st.container(border=True):
@@ -32,6 +32,12 @@ with col2:
         st.markdown("### ⚖️ Inventory Matching")
         st.write("SAP 전산 재고와 WMS 실재고를 비교하여 차이가 발생하는 품목을 자동 탐지하고 시각화합니다.")
         st.page_link("pages/2_Inventory_Alignment.py", label="Inventory Matching으로 이동", icon="⚖️", use_container_width=True)
+
+with col3:
+    with st.container(border=True):
+        st.markdown("### 🌏 해외창고 재고대사")
+        st.write("SAP 재고와 해외 WMS 실재고를 창고별로 대사하여 수량·금액 차이를 자동으로 산출하고 분석합니다.")
+        st.page_link("pages/3_Overseas_Reconciliation.py", label="해외창고 재고대사로 이동", icon="🌏", use_container_width=True)
 
 st.divider()
 
