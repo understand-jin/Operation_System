@@ -1,6 +1,8 @@
 import pandas as pd
 
-
+##################################################
+# 해외 창고 대사 함수 
+##################################################
 def load_sap_data(df1: pd.DataFrame, df2: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
 
     # ── 1번 자료 (재고개요) ────────────────────────────────────
@@ -46,6 +48,8 @@ def sap_data_processing(overview_df: pd.DataFrame, ledger_df: pd.DataFrame) -> p
     
     result["저장위치"] = (pd.to_numeric(result["저장위치"], errors="coerce").fillna(0).astype(int).astype(str))
 
+    check = result.copy()
+
     agg = (result.groupby(["자재코드", "저장위치"], as_index=False, dropna=False)[["기말재고수량", "기말재고금액"]].sum())
 
     meta = (result.groupby("자재코드", as_index=False).agg({"자재내역": "first", "단가": "first"}))
@@ -56,7 +60,7 @@ def sap_data_processing(overview_df: pd.DataFrame, ledger_df: pd.DataFrame) -> p
     desired_cols = ["자재코드", "저장위치", "자재내역", "기말재고수량", "기말재고금액", "단가"]
     result = result[desired_cols]
 
-    return result
+    return result, check
 
 
 def wms_sap(sap_df: pd.DataFrame, wms_df: pd.DataFrame, warehouse_code: str) -> pd.DataFrame:
@@ -71,11 +75,19 @@ def wms_sap(sap_df: pd.DataFrame, wms_df: pd.DataFrame, warehouse_code: str) -> 
 
     wms_filtered = wms_df.copy()
     wms_filtered = wms_filtered.rename(columns = {"가용재고" : "WMS수량"})
+    
+    # 자재코드 숫자인 것만 필터링 (불필요한 행 제거)
     wms_filtered = wms_filtered[pd.to_numeric(wms_filtered["자재코드"], errors="coerce").notna()]
+    wms_filtered["자재코드"] = wms_filtered["자재코드"].astype(str).str.strip()
+
+    # 자재코드별 그룹화하여 수량 합산
+    wms_agg = wms_filtered.groupby("자재코드", as_index=False).agg({
+        "WMS수량": "sum",
+        "자재내역": "first"  # 자재내역은 첫 번째 값 사용
+    })
 
     sap_filtered["자재코드"] = sap_filtered["자재코드"].astype(str).str.strip()
-    wms_filtered["자재코드"] = wms_filtered["자재코드"].astype(str).str.strip()
-    result_df = pd.merge(sap_filtered, wms_filtered, on="자재코드", how="outer")
+    result_df = pd.merge(sap_filtered, wms_agg, on="자재코드", how="outer")
 
     result_df["SAP수량"] = result_df["SAP수량"].fillna(0)
     result_df["WMS수량"] = result_df["WMS수량"].fillna(0)
@@ -101,3 +113,105 @@ def wms_sap(sap_df: pd.DataFrame, wms_df: pd.DataFrame, warehouse_code: str) -> 
     result_df = result_df.sort_values(by="차이", ascending=False)
 
     return result_df
+
+
+##################################################################
+# 재고 데이터 전처리 함수 
+##################################################################
+def bucketize(days):
+    if pd.isna(days):
+        return "미상"
+    if days < 0:
+        return "기간만료"
+    elif days <= 30:
+        return "- 1달 미만"
+    elif days <= 90:
+        return "1~3달"
+    elif days <= 180:
+        return "3~6달"
+    elif days <= 365:
+        return "6~12달"
+    else:
+        return "1년 이상"
+
+def aging_inventory_preprocess(cost_df, standard_df, expiration_df, sales_df, cls_df):
+
+    # 1. 데이터 불러오기 + 컬럼명 변경
+    # 자재수불부 (cost_df) [자재코드, 기말수량_cosst, 기말금액]
+    cost_df = cost_df[["자재","기말(수량)", "기말(금액)합계"]].copy()
+    cost_df.rename(columns = {"자재" : "자재코드", "기말(수량)" : "기말수량_cost", "기말(금액)합계" : "기말금액"}, inplace = True)
+    cost_df["자재코드"] = (cost_df["자재코드"].astype(str).str.strip().str.replace(r"\.0$", "", regex=True))
+
+    # 재고개요 (standard_df) [자재코드, 플랜트, 특별재고, 저장위치, 배치, 기말수량]
+    standard_df = standard_df[["자재", "자재 내역", "플랜트", "특별 재고", "저장 위치", "배치", "기말 재고 수량"]].copy()
+    standard_df.rename(columns = {"자재" : "자재코드", "자재 내역" : "자재내역", "특별 재고" : "특별재고", "저장 위치" : "저장위치", "기말 재고 수량" : "기말수량"}, inplace = True)
+    standard_df["자재코드"] = (standard_df["자재코드"].astype(str).str.strip().str.replace(r"\.0$", "", regex=True))
+    standard_df["배치"] = (standard_df["배치"].astype(str).str.strip().str.replace(r"\.0$", "", regex=True))
+
+    # 배치별유효기한 (expiration_df) [자재코드, 배치, 유효기한]
+    expiration_df = expiration_df[["자재", "배치", "배치만료일"]].copy()
+    expiration_df.rename(columns = {"자재" : "자재코드", "배치만료일" : "유효기한"}, inplace = True)
+    expiration_df["자재코드"] = (expiration_df["자재코드"].astype(str).str.strip().str.replace(r"\.0$", "", regex=True))
+    expiration_df["배치"] = (expiration_df["배치"].astype(str).str.strip().str.replace(r"\.0$", "", regex=True))
+    
+
+    # 3개월매출 (sales_df) [년월, 자재코드, 순매출금액, 순매출수량]
+    sales_df = sales_df[["년월", "자재", "실매출액", "순매출수량"]].copy()
+    sales_df.rename(columns = {"자재" : "자재코드", "실매출액" : "순매출금액"}, inplace = True)
+    sales_df["자재코드"] = (sales_df["자재코드"].astype(str).str.strip().str.replace(r"\.0$", "", regex=True))
+    
+
+    # 대분류_소분류 (cls_df) [자재코드, 대분류, 소분류]
+    cls_df = cls_df[["자재", "대분류", "소분류"]].copy()
+    cls_df.rename(columns= {"자재" : "자재코드"}, inplace = True)
+    cls_df["자재코드"] = (cls_df["자재코드"].astype(str).str.strip().str.replace(r"\.0$", "", regex=True))
+    
+
+    #2. 단가 계산 후 standard에 mapping
+    cost_df["기말수량_cost"] = pd.to_numeric(cost_df["기말수량_cost"], errors="coerce")
+    cost_df["기말금액"] = pd.to_numeric(cost_df["기말금액"], errors="coerce")
+    cost_df["단가"] = cost_df["기말금액"] / cost_df["기말수량_cost"].replace(0, pd.NA)
+    
+    cost_map = cost_df.drop_duplicates(subset=["자재코드"]).set_index("자재코드")["단가"]
+    standard_df["단가"] = standard_df["자재코드"].map(cost_map).fillna(0)
+    standard_df = standard_df[["자재코드", "자재내역", "플랜트", "특별재고", "저장위치", "배치", "기말수량", "단가"]]
+
+    #3. 소분류, 대분류 standard에 mapping
+    big_map = cls_df.drop_duplicates(subset=["자재코드"]).set_index("자재코드")["대분류"]
+    small_map = cls_df.drop_duplicates(subset=["자재코드"]).set_index("자재코드")["소분류"]
+    standard_df["대분류"] = standard_df["자재코드"].map(big_map).fillna("미분류")
+    standard_df["소분류"] = standard_df["자재코드"].map(small_map).fillna("미분류")
+
+    # 4. 유효기한 standard에 mapping
+    exp_map = (expiration_df.drop_duplicates(subset=["자재코드", "배치"]).set_index(["자재코드", "배치"])["유효기한"])
+    standard_df = standard_df.join(exp_map, on=["자재코드", "배치"])
+    standard_df["유효기한"] = standard_df["유효기한"].fillna("nan")
+    
+    # 5. 남은일 & 유효기한구간 계산
+    standard_df["유효기한"] = pd.to_datetime(standard_df["유효기한"], errors="coerce").dt.normalize()
+    today_ts = pd.Timestamp.today().normalize()
+    standard_df["남은일"] = (standard_df["유효기한"] - today_ts).dt.days
+    standard_df["유효기한구간"] = standard_df["남은일"].apply(bucketize)
+
+    # 6.재고금액계산
+    standard_df["기말금액"] = standard_df["기말수량"] * standard_df["단가"]
+
+    # 7. 3평판 계산
+    tmp = sales_df.copy()
+    tmp["순매출수량"] = pd.to_numeric(tmp["순매출수량"], errors="coerce").fillna(0)
+    tmp["년월"] = tmp["년월"].astype(str).str.strip()
+    tmp["자재코드"] = tmp["자재코드"].astype(str).str.strip().str.replace(r"\.0$", "", regex=True)
+    month_count = tmp.groupby("자재코드")["년월"].nunique()
+    month_qty = tmp.groupby("자재코드")["순매출수량"].sum()
+    sales_avg = (month_qty / month_count.replace(0, pd.NA)).fillna(0)
+
+    standard_df["3평판"] = standard_df["자재코드"].map(sales_avg).fillna(0)
+    
+    # 8. 유효기한 포맷팅: YYYY-MM-DD 형태로 변환하고 NaN은 빈 문자열로 처리
+    standard_df["유효기한"] = standard_df["유효기한"].dt.strftime("%Y-%m-%d").fillna("")
+    
+    standard_df = standard_df[["자재코드", "자재내역", "플랜트", "특별재고", "저장위치", "배치", "기말수량", "기말금액", "단가", "대분류", "소분류", "유효기한", "남은일", "유효기한구간", "3평판"]]
+    standard_df = standard_df.reset_index(drop=True) 
+    standard_df.insert(0, "인덱스", standard_df.index + 1)
+
+    return standard_df

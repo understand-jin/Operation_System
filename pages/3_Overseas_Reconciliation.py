@@ -2,19 +2,21 @@ import streamlit as st
 import pandas as pd
 from data_utils import load_sap_data, sap_data_processing, wms_sap
 from utils import read_excel_with_smart_header, load_csv_any_encoding
+from style import apply_style
 
 st.set_page_config(page_title="해외창고 재고대사", layout="wide")
-st.title("🌏 해외 창고 재고대사")
+apply_style()
+st.title("해외 창고 재고대사")
 st.divider()
 
 # ── 파일 업로드 ────────────────────────────────────────────────
-st.subheader("📂 SAP 파일 업로드")
+st.subheader("SAP 파일 업로드")
 
 with st.container(border=True):
     col1, col2 = st.columns(2)
 
     with col1:
-        st.markdown("#### 📋 재고개요")
+        st.markdown("#### 재고개요")
         overview_file = st.file_uploader(
             "재고개요 파일 선택",
             type=["xlsx", "xls"],
@@ -22,10 +24,10 @@ with st.container(border=True):
             label_visibility="collapsed",
         )
         if overview_file:
-            st.success(f"✅ {overview_file.name}")
+            st.success(f"{overview_file.name}")
 
     with col2:
-        st.markdown("#### 📒 자재수불부")
+        st.markdown("#### 자재수불부")
         ledger_file = st.file_uploader(
             "자재수불부 파일 선택",
             type=["xlsx", "xls"],
@@ -33,7 +35,7 @@ with st.container(border=True):
             label_visibility="collapsed",
         )
         if ledger_file:
-            st.success(f"✅ {ledger_file.name}")
+            st.success(f"{ledger_file.name}")
 
 # ── 공통 로더 ──────────────────────────────────────────────────
 def load_uploaded_file(uploaded_file):
@@ -46,11 +48,11 @@ def load_uploaded_file(uploaded_file):
             df = read_excel_with_smart_header(file_bytes)
         return df
     except Exception as e:
-        st.error(f"❌ 파일 로드 오류 ({uploaded_file.name}): {e}")
+        st.error(f"파일 로드 오류 ({uploaded_file.name}): {e}")
         return None
 
 # ── SAP 데이터 불러오기 ────────────────────────────────────────
-if st.button("🚀 데이터 불러오기", disabled=not (overview_file and ledger_file)):
+if st.button("데이터 불러오기", disabled=not (overview_file and ledger_file)):
     try:
         df1 = load_uploaded_file(overview_file)
         df2 = load_uploaded_file(ledger_file)
@@ -59,21 +61,22 @@ if st.button("🚀 데이터 불러오기", disabled=not (overview_file and ledg
             st.stop()
 
         overview_df, ledger_df = load_sap_data(df1, df2)
-        sap_df = sap_data_processing(overview_df, ledger_df)
+        sap_df, check_df = sap_data_processing(overview_df, ledger_df)
 
         st.session_state["sap_df"]    = sap_df
+        st.session_state["check_df"]  = check_df
         st.session_state["ledger_df"] = ledger_df
-        st.success("✅ 데이터 로드 완료!")
+        st.success("데이터 로드 완료!")
 
     except Exception as e:
-        st.error(f"❌ 오류 발생: {e}")
+        st.error(f"오류 발생: {e}")
 
 # ── SAP 결과 표시 ──────────────────────────────────────────────
 if "sap_df" in st.session_state:
     sap_df = st.session_state["sap_df"]
 
     st.divider()
-    st.subheader("📊 SAP 재고 평가 결과")
+    st.subheader("SAP 재고 평가 결과")
 
     m1, m2, m3 = st.columns(3)
     with m1:
@@ -95,22 +98,33 @@ if "sap_df" in st.session_state:
 
     csv_data = sap_df.to_csv(index=False).encode("utf-8-sig")
     st.download_button(
-        label="⬇️ SAP 재고 평가 결과 CSV 다운로드",
+        label="SAP 재고 평가 결과 CSV 다운로드 (요약)",
         data=csv_data,
-        file_name="SAP_Valuation.csv",
+        file_name="SAP_Valuation_Summary.csv",
         mime="text/csv",
         use_container_width=True,
     )
 
+    if "check_df" in st.session_state:
+        check_df = st.session_state["check_df"]
+        csv_check = check_df.to_csv(index=False).encode("utf-8-sig")
+        st.download_button(
+            label="세부 내역 CSV 다운로드 (전체)",
+            data=csv_check,
+            file_name="SAP_Check_Details.csv",
+            mime="text/csv",
+            use_container_width=True,
+        )
+
     # ── WMS 대사 섹션 ──────────────────────────────────────────
     st.divider()
-    st.subheader("🔄 WMS 재고 대사")
+    st.subheader("WMS 재고 대사")
 
     with st.container(border=True):
         wms_col1, wms_col2 = st.columns([2, 1])
 
         with wms_col1:
-            st.markdown("#### 📦 WMS 파일 업로드")
+            st.markdown("#### WMS 파일 업로드")
             wms_file = st.file_uploader(
                 "WMS 파일 선택 (xlsx, xls, csv)",
                 type=["xlsx", "xls", "csv"],
@@ -118,10 +132,10 @@ if "sap_df" in st.session_state:
                 label_visibility="collapsed",
             )
             if wms_file:
-                st.success(f"✅ {wms_file.name}")
+                st.success(f"{wms_file.name}")
 
         with wms_col2:
-            st.markdown("#### 🏭 창고 선택")
+            st.markdown("#### 창고 선택")
             WAREHOUSE_OPTIONS = [
                 ("6020", "인니창고"),
                 ("7020", "풀필먼트"),
@@ -147,7 +161,7 @@ if "sap_df" in st.session_state:
             warehouse_code = selected[0] if selected else ""
 
     if st.button(
-        "🔄 WMS 대사 실행",
+        "WMS 대사 실행",
         disabled=not (wms_file and warehouse_code),
         use_container_width=True,
     ):
@@ -159,10 +173,10 @@ if "sap_df" in st.session_state:
             result_df = wms_sap(sap_df, wms_df, warehouse_code)
             st.session_state["result_df"] = result_df
             st.session_state["warehouse_code"] = warehouse_code
-            st.success(f"✅ 저장위치 [{warehouse_code}] 대사 완료! ({len(result_df):,}건)")
+            st.success(f"저장위치 [{warehouse_code}] 대사 완료! ({len(result_df):,}건)")
 
         except Exception as e:
-            st.error(f"❌ 오류 발생: {e}")
+            st.error(f"오류 발생: {e}")
 
 # ── 대사 결과 표시 ─────────────────────────────────────────────
 if "result_df" in st.session_state:
@@ -170,7 +184,7 @@ if "result_df" in st.session_state:
     wh_code   = st.session_state.get("warehouse_code", "")
 
     st.divider()
-    st.subheader(f"📋 대사 결과 — 저장위치: {wh_code}")
+    st.subheader(f"대사 결과 — 저장위치: {wh_code}")
 
     # 탭별 데이터 분리 (차이금액 기준 정렬)
     sort_col = "차이금액" if "차이금액" in result_df.columns else "차이"
@@ -184,23 +198,41 @@ if "result_df" in st.session_state:
 
     def show_scorecard_and_table(df):
         """스코어카드 + 데이터프레임 표시 헬퍼"""
+        sum_cols = ["SAP금액", "WMS금액", "차이", "차이금액"]
+        df_calc = df.copy()
+        for col in sum_cols:
+            if col in df_calc.columns:
+                df_calc[col] = pd.to_numeric(df_calc[col], errors="coerce").fillna(0)
+
         c1, c2, c3, c4, c5 = st.columns(5)
         c1.metric("총 수", f"{len(df):,}건")
-        if "SAP금액" in df.columns:
-            c2.metric("SAP금액 합계", f"{df['SAP금액'].sum():,.0f}원")
-        if "WMS금액" in df.columns:
-            c3.metric("WMS금액 합계", f"{df['WMS금액'].sum():,.0f}원")
-        if "차이" in df.columns:
-            c4.metric("차이 합계", f"{df['차이'].sum():,.0f}")
-        if "차이금액" in df.columns:
-            c5.metric("차이금액 합계", f"{df['차이금액'].sum():,.0f}원")
+        if "SAP금액" in df_calc.columns:
+            c2.metric("SAP금액 합계", f"{df_calc['SAP금액'].sum():,.2f}원")
+        if "WMS금액" in df_calc.columns:
+            c3.metric("WMS금액 합계", f"{df_calc['WMS금액'].sum():,.2f}원")
+        if "차이" in df_calc.columns:
+            c4.metric("차이 합계", f"{df_calc['차이'].sum():,.0f}")
+        if "차이금액" in df_calc.columns:
+            c5.metric("차이금액 합계", f"{df_calc['차이금액'].sum():,.2f}원")
 
-        st.dataframe(df, use_container_width=True, height=500)
+        st.dataframe(
+            df.style.format({
+                "WMS수량": "{:,.0f}",
+                "SAP수량": "{:,.0f}",
+                "WMS금액": "{:,.2f}",
+                "SAP금액": "{:,.2f}",
+                "차이": "{:,.0f}",
+                "차이금액": "{:,.2f}",
+                "단가": "{:,.2f}"
+            }),
+            use_container_width=True,
+            height=500
+        )
 
     tab_all, tab_pos, tab_neg = st.tabs([
-        f"📋 전체 ({len(result_df):,}건)",
-        f"🔺 양수 ({len(df_pos):,}건)",
-        f"🔻 음수 ({len(df_neg):,}건)",
+        f"전체 ({len(result_df):,}건)",
+        f"양수 ({len(df_pos):,}건)",
+        f"음수 ({len(df_neg):,}건)",
     ])
 
     with tab_all:
@@ -210,13 +242,24 @@ if "result_df" in st.session_state:
     with tab_neg:
         show_scorecard_and_table(df_neg)
 
-    csv_result = result_df.to_csv(index=False).encode("utf-8-sig")
+    # CSV 다운로드용 데이터프레임 (쉼표 포함)
+    csv_df = result_df.copy()
+    qty_cols = ["WMS수량", "SAP수량", "차이"]
+    amt_cols = ["WMS금액", "SAP금액", "차이금액", "단가"]
+
+    for col in qty_cols:
+        if col in csv_df.columns:
+            csv_df[col] = csv_df[col].apply(lambda x: f"{x:,.0f}" if pd.notnull(x) else "")
+
+    for col in amt_cols:
+        if col in csv_df.columns:
+            csv_df[col] = csv_df[col].apply(lambda x: f"{x:,.2f}" if pd.notnull(x) else "")
+
+    csv_result = csv_df.to_csv(index=False).encode("utf-8-sig")
     st.download_button(
-        label=f"⬇️ 대사 결과 CSV 다운로드 (저장위치: {wh_code})",
+        label=f"대사 결과 CSV 다운로드 (저장위치: {wh_code})",
         data=csv_result,
         file_name=f"WMS_SAP_Reconcile_{wh_code}.csv",
         mime="text/csv",
         use_container_width=True,
     )
-
-
