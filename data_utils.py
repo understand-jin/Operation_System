@@ -31,6 +31,18 @@ def load_sap_data(df1: pd.DataFrame, df2: pd.DataFrame) -> tuple[pd.DataFrame, p
 
     return overview_df, ledger_df
 
+def filter_special_stock(df: pd.DataFrame, mat_col: str, special_stock_col: str) -> pd.DataFrame:
+    """
+    자재코드가 '1'로 시작하지 않고(원료 아님) AND 특별재고가 None/NaN/빈값이 아닌 행 제거 (특별재고 처리 로직)
+    """
+    if mat_col not in df.columns or special_stock_col not in df.columns:
+        return df
+    
+    is_not_raw      = ~df[mat_col].astype(str).str.startswith("1")
+    is_special_stk  = ~df[special_stock_col].isna() & \
+                      ~df[special_stock_col].astype(str).str.strip().str.lower().isin(["none", "nan", ""])
+    
+    return df[~(is_not_raw & is_special_stk)].reset_index(drop=True)
 
 def sap_data_processing(overview_df: pd.DataFrame, ledger_df: pd.DataFrame) -> pd.DataFrame:
     price_map = ledger_df[["자재코드", "단가"]].copy()
@@ -40,11 +52,7 @@ def sap_data_processing(overview_df: pd.DataFrame, ledger_df: pd.DataFrame) -> p
 
     result["기말재고금액"] = result["기말재고수량"] * result["단가"]
 
-    # 자재코드가 '1'로 시작하지 않고(원료 아님) AND 특별재고가 None/NaN/빈값이 아닌 행 제거 (특별재고 처리 로직)
-    is_not_raw      = ~result["자재코드"].astype(str).str.startswith("1")
-    is_special_stk  = ~result["특별재고"].isna() & \
-                      ~result["특별재고"].astype(str).str.strip().str.lower().isin(["none", "nan", ""])
-    result = result[~(is_not_raw & is_special_stk)].reset_index(drop=True)
+    result = filter_special_stock(result, mat_col="자재코드", special_stock_col="특별재고")
     
     result["저장위치"] = (pd.to_numeric(result["저장위치"], errors="coerce").fillna(0).astype(int).astype(str))
 

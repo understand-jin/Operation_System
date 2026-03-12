@@ -4,6 +4,7 @@ import numpy as np
 import io
 
 from utils import read_excel_with_smart_header, load_csv_any_encoding
+from data_utils import filter_special_stock
 from style import apply_style
 
 st.set_page_config(page_title="재고 시뮬레이션", layout="wide")
@@ -246,12 +247,15 @@ def build_mapped_inventory_df(
     out[amt_col] = pd.to_numeric(out[amt_col], errors="coerce").fillna(0.0)
 
     if dedup_by_material:
-        group_key = inv_code_col if inv_code_col in out.columns else "_mat_key"
+        mat_key = inv_code_col if inv_code_col in out.columns else "_mat_key"
+        batch_key_candidates = ("배치", "Batch", "배치번호")
+        batch_key = next((c for c in batch_key_candidates if c in out.columns), None)
+        group_keys = [mat_key, batch_key] if batch_key else [mat_key]
         agg_map = {qty_col: "sum", amt_col: "sum"}
         for c in out.columns:
-            if c not in agg_map and c != group_key:
+            if c not in agg_map and c not in group_keys:
                 agg_map[c] = "first"
-        out = out.groupby(group_key, as_index=False).agg(agg_map)
+        out = out.groupby(group_keys, as_index=False).agg(agg_map)
 
     expiry_candidates = ["유효 기한", "유효기간", "유효기한"]
     expiry_col = next((c for c in expiry_candidates if c in out.columns), None)
@@ -268,7 +272,15 @@ def build_mapped_inventory_df(
 
     qty_num = out[qty_col]
     amt_num = out[amt_col]
-    out["단가"] = amt_num / qty_num.replace({0: pd.NA})
+
+    # 단가: 자재코드별 전체 금액합 / 전체 수량합 (배치별 단가가 아닌 자재 단위 가중평균)
+    mat_key_for_price = inv_code_col if inv_code_col in out.columns else "_mat_key"
+    mat_totals = out.groupby(mat_key_for_price, sort=False).agg(
+        _sum_amt=(amt_col, "sum"),
+        _sum_qty=(qty_col, "sum"),
+    )
+    mat_totals["_unit_cost"] = mat_totals["_sum_amt"] / mat_totals["_sum_qty"].replace({0: np.nan})
+    out["단가"] = out[mat_key_for_price].map(mat_totals["_unit_cost"])
 
     sales_col = "평판 * 1.38배" if rating_mode == "x138" else ("평판" if "평판" in out.columns else None)
     out["출하원가"] = pd.to_numeric(out["단가"], errors="coerce") * pd.to_numeric(out.get(sales_col, 0), errors="coerce")
@@ -474,11 +486,13 @@ def simulate_monthly_remaining_amount_fefo(
     out = df.copy()
     if mat_col not in out.columns:
         raise KeyError(f"'{mat_col}' 컬럼이 필요합니다.")
-    if batch_col not in out.columns:
-        raise KeyError(f"FEFO를 하려면 '{batch_col}'(배치) 컬럼이 필요합니다.")
+    # 배치 컬럼이 없어도 동작 (제조사 데이터 등)
     exp_col = next((c for c in expiry_candidates if c in out.columns), None)
     if exp_col is None:
         raise KeyError(f"유효기간 컬럼이 없습니다. 후보={expiry_candidates}")
+
+    qty_candidates_sim = ["기말 재고 수량", "기말수량", "재고수량"]
+    qty_col_sim = next((c for c in qty_candidates_sim if c in out.columns), None)
 
     out[amount_col] = pd.to_numeric(out.get(amount_col), errors="coerce").fillna(0.0)
     out[burn_col]   = pd.to_numeric(out.get(burn_col), errors="coerce").fillna(0.0)
@@ -490,6 +504,40 @@ def simulate_monthly_remaining_amount_fefo(
 
     season_set = set(str(x).strip() for x in (season_mat_codes or []))
     out["_is_season"] = out[mat_col].astype(str).str.strip().isin(season_set)
+
+    # ── 배치별 월 소진량: 이미 계산된 출하원가 컨럼 직접 사용 ──
+    # (각 자재코드-배치에 해당하는 실제 단가 × 평판으로 계산된 값을 그대로 사용)
+    if burn_col in out.columns:
+        batch_burn_map = out[burn_col].to_dict()   # {row_idx: 출하원가}
+        mat_season_map = (
+            out.groupby(mat_col, sort=False)["_is_season"]
+            .first()
+            .to_dict()
+        )
+    else:
+        batch_burn_map = None
+        mat_season_map = None
+    # 배치가 여러 개일 때 가중평균 단가(총금액/총수량) × 평판으로 계산하여 배치별 단가 편차 제거
+    sales_col_candidates = ["출하원가"]  # burn_col 기본값
+    if qty_col_sim is not None and "평판" in out.columns:
+        mat_totals = (
+            out.groupby(mat_col, sort=False)
+            .agg(
+                _total_amt=(amount_col, "sum"),
+                _total_qty=(qty_col_sim, "sum"),
+                _rating=("평판", "first"),
+                _is_season=("_is_season", "first"),
+            )
+            .reset_index()
+        )
+        mat_totals["_unit_cost"] = mat_totals["_total_amt"] / mat_totals["_total_qty"].replace({0: np.nan})
+        mat_totals["_mat_burn"] = mat_totals["_unit_cost"] * mat_totals["_rating"]
+        mat_burn_map   = mat_totals.set_index(mat_col)["_mat_burn"].to_dict()
+        mat_season_map = mat_totals.set_index(mat_col)["_is_season"].to_dict()
+    else:
+        # 평판 컬럼 없는 경우 기존 방식 fallback
+        mat_burn_map   = None
+        mat_season_map = None
 
     months = []
     y, m = start_ym
@@ -503,6 +551,7 @@ def simulate_monthly_remaining_amount_fefo(
         out[col_fmt(yy, mm)] = 0.0
 
     remaining = out[amount_col].to_numpy().copy()
+    # FEFO 정렬: 유효기한 빠른 배치 먼저 (exp_dt ascending)
     grouped = (
         out.reset_index()
            .sort_values(by=[mat_col, "_has_exp", "_exp_dt"], ascending=[True, False, True])
@@ -515,26 +564,41 @@ def simulate_monthly_remaining_amount_fefo(
         col = col_fmt(yy, mm)
         season_allowed = (mm in season_months)
         for mat, idx_list in grouped.items():
-            mat_burn = float(out.loc[idx_list[0], burn_col]) if idx_list else 0.0
-            if mat_burn <= 0: continue
-            is_season_item = bool(out.loc[idx_list[0], "_is_season"])
-            if is_season_item and (not season_allowed): continue
-            burn_left = mat_burn
+            is_season_item = bool(mat_season_map.get(mat, False)) if mat_season_map else False
+            if is_season_item and not season_allowed:
+                continue
+
+            # 자재별 월 소진 예산: 첫 유효 배치의 출하원가를 공유 예산으로 사용
+            first_i = next(
+                (i for i in idx_list if bool(out.at[i, "_has_exp"]) and
+                 float((batch_burn_map or {}).get(i, 0) if batch_burn_map else out.at[i, burn_col]) > 0),
+                None
+            )
+            if first_i is None:
+                continue
+
+            mat_burn = float(batch_burn_map[first_i] if batch_burn_map is not None else out.at[first_i, burn_col])
+            if mat_burn <= 0:
+                continue
+
+            burn_left = mat_burn   # 배치 간 공유·이월되는 예산
             for i in idx_list:
+                if burn_left <= 0:
+                    break
                 if not bool(out.at[i, "_has_exp"]): continue
                 cy = out.at[i, "_cut_y"]; cm = out.at[i, "_cut_m"]
                 if pd.isna(cy) or pd.isna(cm): continue
                 cy = int(cy); cm = int(cm)
                 if (yy > cy) or (yy == cy and mm > cm): continue
-                if burn_left <= 0: break
                 use = min(remaining[i], burn_left)
+                if use <= 0: continue
                 remaining[i] -= use
                 burn_left -= use
-                if burn_left <= 0: break
         out.loc[out["_has_exp"], col] = remaining[out["_has_exp"].to_numpy()]
 
     out = out.drop(columns=["_exp_dt","_has_exp","_cutoff_dt","_cut_y","_cut_m","_is_season"], errors="ignore")
     return out
+
 
 # ======================================================
 # 부진재고 컬럼 추가
@@ -743,6 +807,15 @@ if run:
     if any(df is None for df in [inv_df, cls_df, rating_df, cancel_df]):
         st.stop()
 
+    original_inv_len = len(inv_df)
+    inv_df = filter_special_stock(inv_df, mat_col="자재", special_stock_col="특별 재고")
+    filtered_inv_len = len(inv_df)
+
+    st.divider()
+    st.subheader("기말재고 특별재고 필터링 결과")
+    st.info(f"자재코드 '1'로 시작하지 않음 & 특별재고 값 있음 → 제거됨 (원본: {original_inv_len:,.0f}건 → 적용 후: {filtered_inv_len:,.0f}건)")
+    st.dataframe(inv_df, use_container_width=True)
+
     st.divider()
     with st.expander("업로드된 원본 데이터 확인 (미리보기)", expanded=False):
         t1, t2, t3, t4 = st.tabs(["기말재고", "분류 및 원가율", "평판 기준", "제조사 취소 현황"])
@@ -770,9 +843,9 @@ if run:
         st.subheader("매핑 결과 확인")
         tab_self, tab_manu = st.tabs(["자사 기말재고 매핑", "제조사 취소 PO 매핑"])
         with tab_self:
-            st.dataframe(mapped_self_plain.head(50), use_container_width=True)
+            st.dataframe(mapped_self_plain, use_container_width=True)
         with tab_manu:
-            st.dataframe(mapped_manu_plain.head(50), use_container_width=True)
+            st.dataframe(mapped_manu_plain, use_container_width=True)
 
         with st.spinner("대분류 소계 리포트 생성 중..."):
             major_report_df = build_major_only_report_table(
@@ -793,13 +866,13 @@ if run:
             with t1:
                 col1, col2 = st.columns([8, 2])
                 with col1:
-                    st.dataframe(combined_plain.head(50), use_container_width=True)
+                    st.dataframe(combined_plain, use_container_width=True)
                 with col2:
                     download_excel(combined_plain, filename="fefo_input_plain.xlsx", sheet_name="InputData")
             with t2:
                 col1, col2 = st.columns([8, 2])
                 with col1:
-                    st.dataframe(combined_x138.head(50), use_container_width=True)
+                    st.dataframe(combined_x138, use_container_width=True)
                 with col2:
                     download_excel(combined_x138, filename="fefo_input_x138.xlsx", sheet_name="InputData")
 
@@ -816,11 +889,18 @@ if run:
 
         st.divider()
         st.subheader("시뮬레이션 결과 요약")
-        tab_p, tab_x = st.tabs(["평판 (자사+제조사)", "평판 * 1.38배 (자사+제조사)"])
+        tab_p, tab_x, tab_sp, tab_sx = st.tabs([
+            "평판 (자사+제조사)", "평판 * 1.38배 (자사+제조사)",
+            "평판 (자사)", "평판 * 1.38배 (자사)",
+        ])
         with tab_p:
-            st.dataframe(sim_plain.head(30), use_container_width=True)
+            st.dataframe(sim_plain, use_container_width=True)
         with tab_x:
-            st.dataframe(sim_x138.head(30), use_container_width=True)
+            st.dataframe(sim_x138, use_container_width=True)
+        with tab_sp:
+            st.dataframe(sim_self_plain, use_container_width=True)
+        with tab_sx:
+            st.dataframe(sim_self_x138, use_container_width=True)
 
         with st.spinner("분기 집계표 생성 중..."):
             _sy, _ey = int(start_year), int(end_year)
