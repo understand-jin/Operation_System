@@ -255,7 +255,7 @@ def build_mapped_inventory_df(
         for c in out.columns:
             if c not in agg_map and c not in group_keys:
                 agg_map[c] = "first"
-        out = out.groupby(group_keys, as_index=False).agg(agg_map)
+        out = out.groupby(group_keys, as_index=False, dropna=False).agg(agg_map)
 
     expiry_candidates = ["유효 기한", "유효기간", "유효기한"]
     expiry_col = next((c for c in expiry_candidates if c in out.columns), None)
@@ -299,6 +299,7 @@ def build_mapped_inventory_df(
 # ======================================================
 def build_mapped_cancel_po_df(
     cancel_df, cls_df, rating_df,
+    inv_mapped_df=None,
     prod_code_candidates=("제품코드", "제품 코드", "자재", "자재코드"),
     prod_name_candidates=("제품명", "품명", "자재 내역", "자재명"),
     qty_candidates=("잔여 PO", "잔여PO", "잔여_PO", "수량", "잔여수량"),
@@ -404,6 +405,21 @@ def build_mapped_cancel_po_df(
         out = out.groupby("자재", as_index=False).agg(agg_map)
 
     out["단가"] = out["기말 재고 금액"] / out["기말 재고 수량"].replace({0: pd.NA})
+
+    # inv_mapped_df의 단가를 자재코드 기준으로 덮어쓰기
+    unmatched_df = pd.DataFrame()
+    if inv_mapped_df is not None and "단가" in inv_mapped_df.columns and "자재" in inv_mapped_df.columns:
+        inv_key = normalize_code_to_int_string(inv_mapped_df["자재"].astype(str))
+        inv_price_map = dict(zip(inv_key, pd.to_numeric(inv_mapped_df["단가"], errors="coerce")))
+        cancel_key = normalize_code_to_int_string(out["자재"].astype(str))
+        matched_prices = cancel_key.map(inv_price_map)
+        mask = matched_prices.notna()
+        out.loc[mask, "단가"] = matched_prices.loc[mask]
+        out["_단가_매칭"] = mask.map({True: "매칭", False: "미매칭"})
+        unmatched_df = out.loc[~mask, ["자재", "자재 내역", "기말 재고 수량", "기말 재고 금액", "단가"]].copy()
+    else:
+        out["_단가_매칭"] = "inv_mapped_df 없음"
+
     sales_col = "평판 * 1.38배" if rating_mode == "x138" else ("평판" if "평판" in out.columns else None)
     out["출하원가"] = pd.to_numeric(out["단가"], errors="coerce") * pd.to_numeric(out.get(sales_col, 0), errors="coerce")
     out["출하판가"] = out["출하원가"] / out["원가율"].replace({0: pd.NA})
@@ -412,7 +428,7 @@ def build_mapped_cancel_po_df(
     if "유효기간" in out.columns:
         out["유효기간"] = pd.to_datetime(out["유효기간"], errors="coerce").dt.strftime("%Y-%m-%d").fillna("")
     out["who"] = "제조사"
-    return out
+    return out, unmatched_df
 
 # ======================================================
 # 대분류 소계 리포트
@@ -687,8 +703,9 @@ def build_category_quarter_table(
         sales_col = found
 
     tmp = base.copy()
-    for c in [cost_col, qty_col, sales_col, cost_rate_col]:
-        tmp[c] = pd.to_numeric(tmp[c], errors="coerce").fillna(0.0)
+    for c in [cost_col, qty_col, sales_col, cost_rate_col, ship_cost_col, ship_price_col]:
+        if c in tmp.columns:
+            tmp[c] = pd.to_numeric(tmp[c], errors="coerce").fillna(0.0)
 
     mat_agg = (
         tmp.groupby(mat_col, dropna=False)
@@ -699,17 +716,11 @@ def build_category_quarter_table(
             qty_col: (qty_col, "sum"),
             sales_col: (sales_col, "first"),
             cost_rate_col: (cost_rate_col, "first"),
+            ship_cost_col: (ship_cost_col, "first"),
+            ship_price_col: (ship_price_col, "first"),
         })
         .reset_index()
     )
-
-    mat_agg["_원가단가"] = 0.0
-    m_qty = mat_agg[qty_col] != 0
-    mat_agg.loc[m_qty, "_원가단가"] = mat_agg.loc[m_qty, cost_col] / mat_agg.loc[m_qty, qty_col]
-    mat_agg[ship_cost_col] = mat_agg["_원가단가"] * mat_agg[sales_col]
-    mat_agg[ship_price_col] = 0.0
-    m_rate = mat_agg[cost_rate_col] != 0
-    mat_agg.loc[m_rate, ship_price_col] = mat_agg.loc[m_rate, ship_cost_col] / mat_agg.loc[m_rate, cost_rate_col]
 
     kpi = (
         mat_agg.groupby(list(cat_cols), dropna=False)
@@ -836,16 +847,23 @@ if run:
         with st.spinner("데이터 매핑 중..."):
             mapped_self_plain = build_mapped_inventory_df(inv_df, cls_df, rating_df, rating_mode="plain", dedup_by_material=True)
             mapped_self_x138  = build_mapped_inventory_df(inv_df, cls_df, rating_df, rating_mode="x138",  dedup_by_material=True)
-            mapped_manu_plain = build_mapped_cancel_po_df(cancel_df, cls_df, rating_df, rating_mode="plain", dedup_by_material=True)
-            mapped_manu_x138  = build_mapped_cancel_po_df(cancel_df, cls_df, rating_df, rating_mode="x138",  dedup_by_material=True)
+            mapped_manu_plain, unmatched_plain = build_mapped_cancel_po_df(cancel_df, cls_df, rating_df, mapped_self_plain, rating_mode="plain", dedup_by_material=True)
+            mapped_manu_x138,  unmatched_x138  = build_mapped_cancel_po_df(cancel_df, cls_df, rating_df, mapped_self_x138,  rating_mode="x138",  dedup_by_material=True)
 
         st.divider()
         st.subheader("매핑 결과 확인")
-        tab_self, tab_manu = st.tabs(["자사 기말재고 매핑", "제조사 취소 PO 매핑"])
+        tab_self, tab_manu, tab_unmatched = st.tabs(["자사 기말재고 매핑", "제조사 취소 PO 매핑", "단가 미매칭 항목"])
         with tab_self:
             st.dataframe(mapped_self_plain, use_container_width=True)
         with tab_manu:
             st.dataframe(mapped_manu_plain, use_container_width=True)
+        with tab_unmatched:
+            st.caption("취소 PO 자재코드가 자사 기말재고에 없어 단가를 덮어쓰지 못한 항목입니다.")
+            if unmatched_plain.empty:
+                st.success("모든 항목이 매칭되었습니다.")
+            else:
+                st.warning(f"미매칭 항목: {len(unmatched_plain)}건")
+                st.dataframe(unmatched_plain, use_container_width=True)
 
         with st.spinner("대분류 소계 리포트 생성 중..."):
             major_report_df = build_major_only_report_table(
