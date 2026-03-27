@@ -6,6 +6,7 @@ import io
 from utils import read_excel_with_smart_header, load_csv_any_encoding
 from data_utils import filter_special_stock
 from style import apply_style
+from excel_styler import apply_template
 
 st.set_page_config(page_title="재고 시뮬레이션", layout="wide")
 apply_style()
@@ -63,6 +64,39 @@ for col, (key, label, hint) in zip(cols, UPLOAD_ITEMS):
                     '<p style="font-size:0.8rem; color:#B0BDD4; margin-top:0.3rem;">파일을 선택해주세요</p>',
                     unsafe_allow_html=True,
                 )
+
+st.divider()
+
+# ======================================================
+# 템플릿 업로드 (선택)
+# ======================================================
+with st.container(border=True):
+    tcol1, tcol2 = st.columns([1, 3])
+    with tcol1:
+        st.markdown(
+            '<p style="font-size:0.72rem; font-weight:700; color:#5A7AAA; '
+            'letter-spacing:0.08em; text-transform:uppercase; margin-bottom:0.3rem;">'
+            '최종 보고서 템플릿 (선택)</p>'
+            '<p style="font-size:0.78rem; color:#8A9BBB; margin:0 0 0.7rem;">'
+            '스타일이 적용된 .xlsx 파일을 업로드하면 템플릿 형식으로 다운로드됩니다</p>',
+            unsafe_allow_html=True,
+        )
+        template_file = st.file_uploader(
+            "보고서 템플릿",
+            type=["xlsx"],
+            key="sim_template",
+            label_visibility="collapsed",
+        )
+        if template_file:
+            st.markdown(
+                f'<p style="font-size:0.8rem; color:#2E7D32; margin-top:0.3rem;">&#10003; {template_file.name}</p>',
+                unsafe_allow_html=True,
+            )
+        else:
+            st.markdown(
+                '<p style="font-size:0.8rem; color:#B0BDD4; margin-top:0.3rem;">업로드하지 않으면 기본 엑셀로 다운로드됩니다</p>',
+                unsafe_allow_html=True,
+            )
 
 st.divider()
 
@@ -257,7 +291,14 @@ def build_mapped_inventory_df(
                 agg_map[c] = "first"
         out = out.groupby(group_keys, as_index=False, dropna=False).agg(agg_map)
 
-    expiry_candidates = ["유효 기한", "유효기간", "유효기한"]
+    # 유효기간 컬럼 표준화: '유효기한'이 있으면 '유효기간'으로 복사
+    if "유효기한" in out.columns and "유효기간" not in out.columns:
+        out["유효기간"] = out["유효기한"]
+    elif "유효기한" in out.columns and "유효기간" in out.columns:
+        # 둘 다 있는 경우, 유효기간이 비어있으면 유효기한으로 채움
+        out["유효기간"] = out["유효기간"].fillna(out["유효기한"])
+
+    expiry_candidates = ["유효기간", "유효 기한", "유효기한"]
     expiry_col = next((c for c in expiry_candidates if c in out.columns), None)
 
     for col in ["평판", "평판 * 1.38배"]:
@@ -492,16 +533,20 @@ def build_major_only_report_table(df_self, df_manu, major_col="대분류", sub_c
 # FEFO 시뮬레이션
 # ======================================================
 def simulate_monthly_remaining_amount_fefo(
-    df, start_ym=(2026, 1), end_ym=(2028, 12),
+    df, start_ym=(2026, 3), end_ym=(2028, 12),
     mat_col="자재", batch_col="배치",
     expiry_candidates=("유효기간", "유효 기한", "유효기한"),
     amount_col="기말 재고 금액", burn_col="출하원가",
     season_mat_codes=None, season_months=(5, 6, 7, 8),
     col_fmt=lambda y, m: f"{str(y)[-2:]}_{m}",
+    debug_logs=None,
+    debug_name="",
 ):
     out = df.copy()
     if mat_col not in out.columns:
         raise KeyError(f"'{mat_col}' 컬럼이 필요합니다.")
+        
+    out[mat_col] = out[mat_col].astype(str).str.replace(r'\.0$', '', regex=True).str.strip()
     # 배치 컬럼이 없어도 동작 (제조사 데이터 등)
     exp_col = next((c for c in expiry_candidates if c in out.columns), None)
     if exp_col is None:
@@ -582,6 +627,9 @@ def simulate_monthly_remaining_amount_fefo(
         for mat, idx_list in grouped.items():
             is_season_item = bool(mat_season_map.get(mat, False)) if mat_season_map else False
             if is_season_item and not season_allowed:
+                if yy == 2026 and "9305997" in str(mat) and debug_logs is not None:
+                    tot_rem = sum(remaining[idx] for idx in idx_list)
+                    debug_logs.append(f"[{debug_name} 2026 DEBUG] {yy}-{mm:02d} | 자재: {mat} | 소진 건너뜀 (사유: 비시즌) | 현재 남은총재고: {tot_rem:,.0f}")
                 continue
 
             # 자재별 월 소진 예산: 첫 유효 배치의 출하원가를 공유 예산으로 사용
@@ -591,13 +639,20 @@ def simulate_monthly_remaining_amount_fefo(
                 None
             )
             if first_i is None:
+                if yy == 2026 and "9305997" in str(mat) and debug_logs is not None:
+                    tot_rem = sum(remaining[idx] for idx in idx_list)
+                    debug_logs.append(f"[{debug_name} 2026 DEBUG] {yy}-{mm:02d} | 자재: {mat} | 소진 건너뜀 (사유: 유효한 배치 예산 없음) | 현재 남은총재고: {tot_rem:,.0f}")
                 continue
 
             mat_burn = float(batch_burn_map[first_i] if batch_burn_map is not None else out.at[first_i, burn_col])
             if mat_burn <= 0:
+                if yy == 2026 and "9305997" in str(mat) and debug_logs is not None:
+                    tot_rem = sum(remaining[idx] for idx in idx_list)
+                    debug_logs.append(f"[{debug_name} 2026 DEBUG] {yy}-{mm:02d} | 자재: {mat} | 소진 건너뜀 (사유: 출하원가 0) | 현재 남은총재고: {tot_rem:,.0f}")
                 continue
 
             burn_left = mat_burn   # 배치 간 공유·이월되는 예산
+            any_used = False
             for i in idx_list:
                 if burn_left <= 0:
                     break
@@ -610,6 +665,22 @@ def simulate_monthly_remaining_amount_fefo(
                 if use <= 0: continue
                 remaining[i] -= use
                 burn_left -= use
+                
+                # Debug print for "9305997" in 2026
+                if yy == 2026:
+                    major = out.at[i, "대분류"] if "대분류" in out.columns else "분류없음"
+                    if "9305997" in str(mat):
+                        any_used = True
+                        tot_rem = sum(remaining[idx] for idx in idx_list)
+                        msg = (f"[{debug_name} 2026 DEBUG] {yy}-{mm:02d} | 대분류: {major} | 자재: {mat} | 배치: {out.at[i, batch_col]} | 유효: {out.at[i, exp_col]} | "
+                               f"월예산(출하원가): {mat_burn:,.0f} | 적용예산: {burn_left+use:,.0f}->{burn_left:,.0f} | 차감: {use:,.0f} | 배치의남은수량: {remaining[i]:,.0f} | 총남은자재: {tot_rem:,.0f}")
+                        if debug_logs is not None:
+                            debug_logs.append(msg)
+                        
+            if yy == 2026 and "9305997" in str(mat) and not any_used and debug_logs is not None:
+                tot_rem = sum(remaining[idx] for idx in idx_list)
+                debug_logs.append(f"[{debug_name} 2026 DEBUG] {yy}-{mm:02d} | 자재: {mat} | 소진 건너뜀 (사유: 시즌 중이나 유효한 배치 없음/남은 수량 0) | 현재 남은총재고: {tot_rem:,.0f}")
+                
         out.loc[out["_has_exp"], col] = remaining[out["_has_exp"].to_numpy()]
 
     out = out.drop(columns=["_exp_dt","_has_exp","_cutoff_dt","_cut_y","_cut_m","_is_season"], errors="ignore")
@@ -646,20 +717,45 @@ def add_obsolete_cols_at_cutoff_6m(
     cut_y = cutoff_dt.dt.year
     cut_m = cutoff_dt.dt.month
 
+    # 시뮬레이션의 가장 첫 번째 달 컬럼 파악 (예: '26_1')
+    sim_cols = out.columns[out.columns.str.match(r"^\d{2}_\d{1,2}$")]
+    first_month_col = sim_cols.min() if len(sim_cols) > 0 else None
+
     for idx in out.index:
         if not has_expiry.loc[idx]: continue
         y = int(cut_y.loc[idx]); m = int(cut_m.loc[idx])
         cut_col = col_fmt(y, m)
-        if cut_col not in out.columns: continue
-        val = pd.to_numeric(out.at[idx, cut_col], errors="coerce")
+        
+        val = np.nan
+        if cut_col in out.columns:
+            # 1. 시뮬레이션 기간 내 정상 도래 케이스
+            val = pd.to_numeric(out.at[idx, cut_col], errors="coerce")
+        elif first_month_col:
+            # 2. 시뮬레이션 기간 밖에 있는 케이스 (과거인지 미래인지 판별)
+            sim_start_y = 2000 + int(first_month_col.split('_')[0])
+            sim_start_m = int(first_month_col.split('_')[1])
+            
+            # 컷오프 연월이 시뮬레이션 시작 월보다 과거라면 -> 애초에 부진재고로 넘어온 악성 물량
+            if (y < sim_start_y) or (y == sim_start_y and m < sim_start_m):
+                val = pd.to_numeric(out.at[idx, first_month_col], errors="coerce")
+            else:
+                # 시뮬레이션 종료 이후의 먼 미래 도래건은 0 처리
+                val = 0.0
+
         if pd.isna(val): continue
         out.at[idx, "부진재고량"] = float(val)
+        
         if float(val) > 0:
             entry_dt = cutoff_dt.loc[idx]
             out.at[idx, "부진재고진입시점"] = entry_dt.strftime("%Y-%m-%d") if pd.notna(entry_dt) else ""
-            q = (entry_dt.month - 1) // 3 + 1
-            yy = str(entry_dt.year)[-2:]
-            out.at[idx, "부진재고진입분기"] = f"{yy}년 {q}Q"
+            
+            # 부진재고진입분기는 진입시점(entry_dt)에서 직접 추출 (유저 요청: 월 기준 1/2/3/4분기 분리)
+            if pd.notna(entry_dt):
+                yy = str(entry_dt.year)[-2:]
+                q = (entry_dt.month - 1) // 3 + 1
+                out.at[idx, "부진재고진입분기"] = f"{yy}년 {q}Q"
+            else:
+                out.at[idx, "부진재고진입분기"] = ""
     return out
 
 # ======================================================
@@ -693,7 +789,17 @@ def build_category_quarter_table(
         .pivot_table(index=list(cat_cols), columns="_분기", values=value_col, aggfunc="sum", fill_value=0.0)
         .reindex(columns=quarter_cols, fill_value=0.0)
     )
-    pivot_detail["합계"] = pivot_detail.sum(axis=1)
+    # [DEBUG 1] 상세 소분류 (Detail) 가로 합산 전후
+    import streamlit as st
+    with st.expander("DEBUG: 상세 소분류(Detail) 합계 계산 전후"):
+        st.write("1. [Before] 가로 합산 전 (pivot_detail):")
+        st.dataframe(pivot_detail, use_container_width=True)
+        
+        pivot_detail["합계"] = pivot_detail.sum(axis=1)
+        
+        st.write("2. [After] '합계' 컬럼 추가 후:")
+        st.dataframe(pivot_detail, use_container_width=True)
+
     pivot_detail = pivot_detail.reset_index()
 
     if sales_col not in base.columns:
@@ -746,20 +852,37 @@ def build_category_quarter_table(
         .groupby([cat_cols[0], "_분기"])[value_col].sum()
         .unstack("_분기").reindex(columns=quarter_cols, fill_value=0.0).reset_index()
     )
-    major_q["합계"] = major_q[quarter_cols].sum(axis=1)
+    # [DEBUG 2] 대분류 소계 (Subtotal) 가로 합산 전후
+    with st.expander("DEBUG: 대분류 소계(Subtotal) 합계 계산 전후"):
+        st.write("1. [Before] 가로 합산 전 (major_q):")
+        st.dataframe(major_q, use_container_width=True)
+        
+        major_q["합계"] = major_q[quarter_cols].sum(axis=1)
+        
+        st.write("2. [After] '합계' 컬럼 추가 후:")
+        st.dataframe(major_q, use_container_width=True)
     major_tbl = major_kpi.merge(major_q, on=cat_cols[0], how="left").fillna(0.0)
     major_tbl[cat_cols[1]] = "소계"
 
     total_cost = mat_agg[cost_col].sum()
     total_ship_cost = mat_agg[ship_cost_col].sum()
-    total = pd.DataFrame([{
-        cat_cols[0]: "총계", cat_cols[1]: "",
-        "원가": total_cost, "출하원가": total_ship_cost,
-        "출하판가": mat_agg[ship_price_col].sum(),
-        "회전월": (total_cost / total_ship_cost if total_ship_cost != 0 else 0),
-        **{q: base.loc[base["_분기"] == q, value_col].sum() for q in quarter_cols},
-        "합계": base[value_col].sum()
-    }])
+    total_q_sums = {q: base.loc[base["_분기"] == q, value_col].sum() for q in quarter_cols}
+    
+    # [DEBUG 3] 총계 (Grand Total) 가로 합산 전후
+    with st.expander("DEBUG: 총계(Grand Total) 합계 계산 전후"):
+        st.write("1. [Before] 각 분기별 데이터 (q_sums):", total_q_sums)
+        
+        total = pd.DataFrame([{
+            cat_cols[0]: "총계", cat_cols[1]: "",
+            "원가": total_cost, "출하원가": total_ship_cost,
+            "출하판가": mat_agg[ship_price_col].sum(),
+            "회전월": (total_cost / total_ship_cost if total_ship_cost != 0 else 0),
+            **total_q_sums,
+            "합계": sum(total_q_sums.values())
+        }])
+        
+        st.write("2. [After] 최종 조립된 총계 행 (total):")
+        st.dataframe(total, use_container_width=True)
 
     rows = [total]
     for d in major_tbl[cat_cols[0]].unique():
@@ -880,30 +1003,50 @@ if run:
 
         st.divider()
         with st.expander("시뮬레이션(FEFO) 입력 데이터 확인", expanded=False):
-            t1, t2 = st.tabs(["평판 기준 입력 데이터", "평판 * 1.38배 입력 데이터"])
+            t1, t2, t3, t4 = st.tabs(["자사 (평판)", "자사 (평판 * 1.38배)", "자사+제조사 (평판)", "자사+제조사 (평판 * 1.38배)"])
             with t1:
+                col1, col2 = st.columns([8, 2])
+                with col1:
+                    st.dataframe(mapped_self_plain, use_container_width=True)
+                with col2:
+                    download_excel(mapped_self_plain, filename="fefo_input_self_plain.xlsx", sheet_name="InputData")
+            with t2:
+                col1, col2 = st.columns([8, 2])
+                with col1:
+                    st.dataframe(mapped_self_x138, use_container_width=True)
+                with col2:
+                    download_excel(mapped_self_x138, filename="fefo_input_self_x138.xlsx", sheet_name="InputData")
+            with t3:
                 col1, col2 = st.columns([8, 2])
                 with col1:
                     st.dataframe(combined_plain, use_container_width=True)
                 with col2:
-                    download_excel(combined_plain, filename="fefo_input_plain.xlsx", sheet_name="InputData")
-            with t2:
+                    download_excel(combined_plain, filename="fefo_input_combined_plain.xlsx", sheet_name="InputData")
+            with t4:
                 col1, col2 = st.columns([8, 2])
                 with col1:
                     st.dataframe(combined_x138, use_container_width=True)
                 with col2:
-                    download_excel(combined_x138, filename="fefo_input_x138.xlsx", sheet_name="InputData")
+                    download_excel(combined_x138, filename="fefo_input_combined_x138.xlsx", sheet_name="InputData")
 
         with st.spinner("FEFO 시뮬레이션 실행 중... (시간이 걸릴 수 있습니다)"):
-            sim_plain      = simulate_monthly_remaining_amount_fefo(combined_plain,    start_ym=start_ym, end_ym=end_ym, season_mat_codes=season_codes)
-            sim_x138       = simulate_monthly_remaining_amount_fefo(combined_x138,     start_ym=start_ym, end_ym=end_ym, season_mat_codes=season_codes)
-            sim_self_plain = simulate_monthly_remaining_amount_fefo(mapped_self_plain, start_ym=start_ym, end_ym=end_ym, season_mat_codes=season_codes)
-            sim_self_x138  = simulate_monthly_remaining_amount_fefo(mapped_self_x138,  start_ym=start_ym, end_ym=end_ym, season_mat_codes=season_codes)
+            debug_logs = []
+            sim_plain      = simulate_monthly_remaining_amount_fefo(combined_plain,    start_ym=start_ym, end_ym=end_ym, season_mat_codes=season_codes, debug_logs=debug_logs, debug_name="자사+제조사 (평판)")
+            sim_x138       = simulate_monthly_remaining_amount_fefo(combined_x138,     start_ym=start_ym, end_ym=end_ym, season_mat_codes=season_codes, debug_logs=debug_logs, debug_name="자사+제조사 (평판 1.38배)")
+            sim_self_plain = simulate_monthly_remaining_amount_fefo(mapped_self_plain, start_ym=start_ym, end_ym=end_ym, season_mat_codes=season_codes, debug_logs=debug_logs, debug_name="자사 (평판)")
+            sim_self_x138  = simulate_monthly_remaining_amount_fefo(mapped_self_x138,  start_ym=start_ym, end_ym=end_ym, season_mat_codes=season_codes, debug_logs=debug_logs, debug_name="자사 (평판 1.38배)")
 
             sim_plain      = add_obsolete_cols_at_cutoff_6m(sim_plain)
             sim_x138       = add_obsolete_cols_at_cutoff_6m(sim_x138)
             sim_self_plain = add_obsolete_cols_at_cutoff_6m(sim_self_plain)
             sim_self_x138  = add_obsolete_cols_at_cutoff_6m(sim_self_x138)
+
+        st.divider()
+        with st.expander("자재 9305997 상세 차감 로그", expanded=True):
+            if debug_logs:
+                st.code("\n".join(debug_logs), language="text")
+            else:
+                st.info("조건(2026년, 자재코드 9305997)에 해당하는 차감 이력이 없습니다.")
 
         st.divider()
         st.subheader("시뮬레이션 결과 요약")
@@ -951,7 +1094,23 @@ if run:
         st.divider()
         st.subheader("보유재고 운영 시뮬레이션 보고 (단위: 억원)")
         st.dataframe(merged2, use_container_width=True, height=900)
-        download_excel(merged2, filename="보유재고_운영_시뮬레이션_보고.xlsx", sheet_name="MergedReport")
+
+        if template_file:
+            try:
+                template_file.seek(0)
+                styled_bytes = apply_template(merged2, template_file.read())
+                st.download_button(
+                    label="최종 보고서 다운로드 (템플릿 적용)",
+                    data=styled_bytes,
+                    file_name="보유재고_운영_시뮬레이션_보고.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    use_container_width=True,
+                )
+            except Exception as tmpl_e:
+                st.warning(f"템플릿 적용 실패, 기본 엑셀로 대체합니다: {tmpl_e}")
+                download_excel(merged2, filename="보유재고_운영_시뮬레이션_보고.xlsx", sheet_name="MergedReport")
+        else:
+            download_excel(merged2, filename="보유재고_운영_시뮬레이션_보고.xlsx", sheet_name="MergedReport")
 
         st.success("시뮬레이션이 완료되었습니다.")
 

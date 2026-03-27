@@ -28,7 +28,7 @@ st.markdown("""
     ">
         Operation Management Platform
     </div>
-    <h1 style="
+    <div style="
         color: #FFFFFF;
         font-size: 2.4rem;
         font-weight: 700;
@@ -37,7 +37,7 @@ st.markdown("""
         letter-spacing: -0.01em;
     ">
         Operation Automation System
-    </h1>
+    </div>
     <p style="
         color: #C0D8FF;
         font-size: 1rem;
@@ -73,7 +73,7 @@ with col1:
                 font-weight:700; letter-spacing:0.06em; padding:0.22rem 0.7rem;
                 border-radius:20px; text-transform:uppercase;">Data Upload</span>
         </div>
-        <h3 style="margin-top:0.8rem; margin-bottom:0.5rem;">데이터 업로드</h3>
+        <h3 style="margin-top:0.8rem; margin-bottom:0.5rem; color:#FFFFFF;">데이터 업로드</h3>
         <p style="color:#4A6080; font-size:0.92rem; line-height:1.6; margin-bottom:1rem;">
             분기별·월별·일별 데이터를 체계적으로 업로드하고 표준화된 CSV로 저장합니다.
             모든 분석 데이터의 기초가 되는 과정입니다.
@@ -89,7 +89,7 @@ with col2:
                 font-weight:700; letter-spacing:0.06em; padding:0.22rem 0.7rem;
                 border-radius:20px; text-transform:uppercase;">Inventory</span>
         </div>
-        <h3 style="margin-top:0.8rem; margin-bottom:0.5rem;">재고 대사</h3>
+        <h3 style="margin-top:0.8rem; margin-bottom:0.5rem; color:#FFFFFF;">재고 대사</h3>
         <p style="color:#4A6080; font-size:0.92rem; line-height:1.6; margin-bottom:1rem;">
             SAP 전산 재고와 WMS 실재고를 비교하여 차이가 발생하는 품목을
             자동 탐지하고 시각화합니다.
@@ -105,7 +105,7 @@ with col3:
                 font-weight:700; letter-spacing:0.06em; padding:0.22rem 0.7rem;
                 border-radius:20px; text-transform:uppercase;">Overseas</span>
         </div>
-        <h3 style="margin-top:0.8rem; margin-bottom:0.5rem;">해외창고 재고대사</h3>
+        <h3 style="margin-top:0.8rem; margin-bottom:0.5rem; color:#FFFFFF;">해외창고 재고대사</h3>
         <p style="color:#4A6080; font-size:0.92rem; line-height:1.6; margin-bottom:1rem;">
             SAP 재고와 해외 WMS 실재고를 창고별로 대사하여 수량·금액
             차이를 자동으로 산출하고 분석합니다.
@@ -121,7 +121,7 @@ with col4:
                 font-weight:700; letter-spacing:0.06em; padding:0.22rem 0.7rem;
                 border-radius:20px; text-transform:uppercase;">Simulation</span>
         </div>
-        <h3 style="margin-top:0.8rem; margin-bottom:0.5rem;">재고 시뮬레이션</h3>
+        <h3 style="margin-top:0.8rem; margin-bottom:0.5rem; color:#FFFFFF;">재고 시뮬레이션</h3>
         <p style="color:#4A6080; font-size:0.92rem; line-height:1.6; margin-bottom:1rem;">
             자사 기말재고와 제조사 취소 PO를 기반으로 FEFO 방식의
             월별 소진·부진재고 시뮬레이션을 수행합니다.
