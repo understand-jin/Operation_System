@@ -144,17 +144,20 @@ if "sap_df" in st.session_state:
                 ("6050", "홈쇼핑위탁창고(CJ)"),
                 ("6060", "홈쇼핑위탁창고(GS)"),
                 ("6070", "홈쇼핑위탁창고(롯데)"),
-                ("6030", "중국수출창고"),
-                ("7030", "CN1_티몰글로벌"),
-                ("7040", "CN2_도우인글로벌"),
+                (["6030", "7030", "7040"], "중국(통합)"),
+                ("6030", "중국수출창고(6030)"),
+                ("7030", "CN1_티며글로벌(7030)"),
+                ("7040", "CN2_도우인글로벌(7040)"),
                 ("7060", "이투마스"),
                 ("7090", "아마존(JP)"),
                 ("6080", "북미(직영)"),
+                ("6090", "천지로지스"),
+                ("7050", "북미(틱톡샵)"),
             ]
             selected = st.selectbox(
                 "창고 선택",
                 options=WAREHOUSE_OPTIONS,
-                format_func=lambda x: f"{x[0]}  |  {x[1]}",
+                format_func=lambda x: f"{'+'.join(x[0]) if isinstance(x[0], list) else x[0]}  |  {x[1]}",
                 key="warehouse_select",
                 label_visibility="collapsed",
             )
@@ -162,7 +165,7 @@ if "sap_df" in st.session_state:
 
     if st.button(
         "WMS 대사 실행",
-        disabled=not (wms_file and warehouse_code),
+        disabled=not (wms_file and (warehouse_code if not isinstance(warehouse_code, list) else len(warehouse_code) > 0)),
         use_container_width=True,
     ):
         try:
@@ -173,7 +176,8 @@ if "sap_df" in st.session_state:
             result_df = wms_sap(sap_df, wms_df, warehouse_code)
             st.session_state["result_df"] = result_df
             st.session_state["warehouse_code"] = warehouse_code
-            st.success(f"저장위치 [{warehouse_code}] 대사 완료! ({len(result_df):,}건)")
+            wh_label = "+".join(warehouse_code) if isinstance(warehouse_code, list) else warehouse_code
+            st.success(f"저장위치 [{wh_label}] 대사 완료! ({len(result_df):,}건)")
 
         except Exception as e:
             st.error(f"오류 발생: {e}")
@@ -182,9 +186,10 @@ if "sap_df" in st.session_state:
 if "result_df" in st.session_state:
     result_df = st.session_state["result_df"]
     wh_code   = st.session_state.get("warehouse_code", "")
+    wh_label  = "+".join(wh_code) if isinstance(wh_code, list) else wh_code
 
     st.divider()
-    st.subheader(f"대사 결과 — 저장위치: {wh_code}")
+    st.subheader(f"대사 결과 — 저장위치: {wh_label}")
 
     # 탭별 데이터 분리 (차이금액 기준 정렬)
     sort_col = "차이금액" if "차이금액" in result_df.columns else "차이"
@@ -245,7 +250,7 @@ if "result_df" in st.session_state:
     # CSV 다운로드용 데이터프레임 (쉼표 포함)
     csv_df = result_df.copy()
     qty_cols = ["WMS수량", "SAP수량", "차이"]
-    amt_cols = ["WMS금액", "SAP금액", "차이금액", "단가"]
+    amt_cols = []
 
     for col in qty_cols:
         if col in csv_df.columns:

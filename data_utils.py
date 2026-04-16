@@ -1,4 +1,5 @@
 import pandas as pd
+import numpy as np
 
 ##################################################
 # 해외 창고 대사 함수 
@@ -6,7 +7,7 @@ import pandas as pd
 def load_sap_data(df1: pd.DataFrame, df2: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
 
     # ── 1번 자료 (재고개요) ────────────────────────────────────
-    overview_df = df1[["자재", "저장 위치", "특별 재고", "자재 내역", "기말 재고 수량"]].copy()
+    overview_df = df1[["자재", "저장 위치", "특별 재고", "자재 내역", "기말 재고 수량", "기말 재고 금액"]].copy()
     overview_df.rename(columns={
         "자재":           "자재코드",
         "저장 위치":      "저장위치",
@@ -52,6 +53,14 @@ def sap_data_processing(overview_df: pd.DataFrame, ledger_df: pd.DataFrame) -> p
 
     result["기말재고금액"] = result["기말재고수량"] * result["단가"]
 
+    result["기말재고금액"] = np.where(
+    pd.to_numeric(result["단가"], errors="coerce") == 0,
+    result["기말 재고 금액"],
+    result["기말재고금액"]
+)
+    remove_list = ["7300456", "7301307", "7301308", "7302156"]
+    result = result[~result["자재코드"].astype(str).isin(remove_list)]
+
     result = filter_special_stock(result, mat_col="자재코드", special_stock_col="특별재고")
     
     result["저장위치"] = (pd.to_numeric(result["저장위치"], errors="coerce").fillna(0).astype(int).astype(str))
@@ -71,22 +80,57 @@ def sap_data_processing(overview_df: pd.DataFrame, ledger_df: pd.DataFrame) -> p
     return result, check
 
 
-def wms_sap(sap_df: pd.DataFrame, wms_df: pd.DataFrame, warehouse_code: str) -> pd.DataFrame:
+def wms_sap(sap_df: pd.DataFrame, wms_df: pd.DataFrame, warehouse_code) -> pd.DataFrame:
+    """
+    warehouse_code: 단일 문자열 또는 문자열 리스트 (예: ["6030", "7030", "7040"])
+    리스트인 경우 해당 창고들의 SAP 재고를 자재코드 기준으로 합산하여 대사.
+    """
     cost_df = sap_df[["자재코드", "단가"]].copy()
-    cost_df["자재코드"] = cost_df["자재코드"].astype(str).str.strip()
+    cost_df["자재코드"] = (
+        cost_df["자재코드"]
+        .astype(str)
+        .str.strip()
+        .str.replace(r"\.0$", "", regex=True)
+    )
     cost_df["단가"] = pd.to_numeric(cost_df["단가"], errors="coerce")
     cost_map = (cost_df.dropna(subset=["단가"]).drop_duplicates(subset=["자재코드"]).set_index("자재코드")["단가"])
 
-    sap_filtered = sap_df[sap_df["저장위치"].astype(str) == str(warehouse_code)].copy()
+    # 단일 코드 → 리스트로 통일
+    if isinstance(warehouse_code, list):
+        codes = [str(c) for c in warehouse_code]
+    else:
+        codes = [str(warehouse_code)]
+
+    sap_filtered = sap_df[sap_df["저장위치"].astype(str).isin(codes)].copy()
     sap_filtered = sap_filtered[["자재코드", "저장위치", "자재내역", "기말재고수량", "기말재고금액", "단가"]]
-    sap_filtered = sap_filtered.rename(columns = {"기말재고수량" : "SAP수량"})
+
+    # 여러 창고인 경우 자재코드별로 수량/금액 합산
+    if len(codes) > 1:
+        sap_meta = sap_filtered.groupby("자재코드", as_index=False).agg(
+            자재내역=("자재내역", "first"),
+            단가=("단가", "first"),
+        )
+        sap_agg = sap_filtered.groupby("자재코드", as_index=False).agg(
+            기말재고수량=("기말재고수량", "sum"),
+            기말재고금액=("기말재고금액", "sum"),
+        )
+        sap_filtered = sap_agg.merge(sap_meta, on="자재코드", how="left")
+        # 저장위치는 묶음 표기
+        sap_filtered["저장위치"] = "+".join(codes)
+
+    sap_filtered = sap_filtered.rename(columns={"기말재고수량": "SAP수량"})
 
     wms_filtered = wms_df.copy()
     wms_filtered = wms_filtered.rename(columns = {"가용재고" : "WMS수량"})
     
     # 자재코드 숫자인 것만 필터링 (불필요한 행 제거)
     wms_filtered = wms_filtered[pd.to_numeric(wms_filtered["자재코드"], errors="coerce").notna()]
-    wms_filtered["자재코드"] = wms_filtered["자재코드"].astype(str).str.strip()
+    wms_filtered["자재코드"] = (
+        wms_filtered["자재코드"]
+        .astype(str)
+        .str.strip()
+        .str.replace(r"\.0$", "", regex=True)
+    )
 
     # 자재코드별 그룹화하여 수량 합산
     wms_agg = wms_filtered.groupby("자재코드", as_index=False).agg({
@@ -94,7 +138,12 @@ def wms_sap(sap_df: pd.DataFrame, wms_df: pd.DataFrame, warehouse_code: str) -> 
         "자재내역": "first"  # 자재내역은 첫 번째 값 사용
     })
 
-    sap_filtered["자재코드"] = sap_filtered["자재코드"].astype(str).str.strip()
+    sap_filtered["자재코드"] = (
+        sap_filtered["자재코드"]
+        .astype(str)
+        .str.strip()
+        .str.replace(r"\.0$", "", regex=True)
+    )
     result_df = pd.merge(sap_filtered, wms_agg, on="자재코드", how="outer")
 
     result_df["SAP수량"] = result_df["SAP수량"].fillna(0)
